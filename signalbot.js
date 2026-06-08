@@ -8,10 +8,34 @@ console.log("Bot starting...");
 console.log("Token set:", !!TELEGRAM_TOKEN);
 console.log("Groq set:", !!GROQ_API_KEY);
 
-// Session store
 const sessions = {};
 
-// ── Indicators ────────────────────────────────────────────
+// ── Market session detector ────────────────────────────────
+function getMarketSession() {
+  const hour = new Date().getUTCHours();
+  if (hour >= 22 || hour < 7)  return { session: "ASIAN",     liquidity: "LOW",    note: "Low volume Asian session. Slow moves, wider spreads. Add 2-3x to hold time." };
+  if (hour >= 7  && hour < 12) return { session: "LONDON",    liquidity: "HIGH",   note: "London session open. High volume, strong moves. Hold times as suggested." };
+  if (hour >= 12 && hour < 17) return { session: "NEW YORK",  liquidity: "VERY HIGH", note: "NY+London overlap. Highest volume of the day. Fast moves, signals more reliable." };
+  if (hour >= 17 && hour < 22) return { session: "NY CLOSE",  liquidity: "MEDIUM", note: "NY closing session. Fading volume. Consider shorter holds or avoid new entries." };
+  return { session: "MIXED", liquidity: "NORMAL", note: "" };
+}
+
+function getSmartHoldTime(tf, session) {
+  const base = {
+    "1m": 15, "3m": 30, "5m": 45, "15m": 90,
+    "30m": 180, "1h": 240, "2h": 480, "4h": 720,
+    "6h": 1080, "8h": 1440, "12h": 2160, "1d": 4320, "3d": 10080, "1w": 20160
+  }[tf] || 240;
+
+  const multiplier = session.liquidity === "LOW" ? 2.5 : session.liquidity === "MEDIUM" ? 1.5 : 1;
+  const mins = Math.round(base * multiplier);
+
+  if (mins < 60)   return `${mins} minutes`;
+  if (mins < 1440) return `${Math.round(mins/60)} hours`;
+  return `${Math.round(mins/1440)} days`;
+}
+
+// ── Indicators ─────────────────────────────────────────────
 function calcRSI(c, p=14) {
   if (c.length < p+1) return 50;
   let g=0,l=0;
@@ -43,52 +67,72 @@ function getIndicators(klines) {
   return {
     price:last, atr,
     rsi:rsi.toFixed(1), rsiState:rsi<30?"OVERSOLD":rsi>70?"OVERBOUGHT":"NEUTRAL",
-    macd:(e12-e26).toFixed(4), macdState:e12>e26?"BULLISH":"BEARISH",
-    sma20:s20.toFixed(2), sma50:s50.toFixed(2),
+    macd:(e12-e26).toFixed(5), macdState:e12>e26?"BULLISH":"BEARISH",
+    sma20:s20.toFixed(5), sma50:s50.toFixed(5),
     trend:last>s50?"UPTREND":"DOWNTREND",
-    bbUpper:(bm+2*bs).toFixed(2), bbLower:(bm-2*bs).toFixed(2),
-    support:Math.min(...l.slice(-20)).toFixed(2), resistance:Math.max(...h.slice(-20)).toFixed(2),
+    bbUpper:(bm+2*bs).toFixed(5), bbLower:(bm-2*bs).toFixed(5),
+    support:Math.min(...l.slice(-20)).toFixed(5), resistance:Math.max(...h.slice(-20)).toFixed(5),
     volume:v[v.length-1]>avgV*1.2?"HIGH":v[v.length-1]<avgV*0.8?"LOW":"NORMAL",
     patterns:patterns.length?patterns.join(", "):"None",
   };
 }
 
-// ── Position sizing (done in code, never by AI) ───────────
+// ── Position sizing ────────────────────────────────────────
 function calcPosition(balance, price, atr) {
+  const LEVERAGE = 500;
   const risk = balance * 0.01;
   const slDist = atr * 1.2;
   let size = risk / slDist;
   let value = size * price;
-  // Cap at 20% of balance — no leverage ever
-  const maxValue = balance * 0.2;
+  const maxValue = balance * LEVERAGE * 0.10;
   if (value > maxValue) { value = maxValue; size = value / price; }
+  const margin = value / LEVERAGE;
+  const marginPct = (margin / balance) * 100;
   return {
     risk: risk.toFixed(2),
     size: size.toFixed(6),
     value: value.toFixed(2),
-    pct: ((value/balance)*100).toFixed(1),
+    margin: margin.toFixed(2),
+    marginPct: marginPct.toFixed(1),
   };
 }
 
-// ── ATR-based levels (fallback if AI fails) ───────────────
 function calcLevels(price, atr, isBuy) {
-  const sl   = isBuy ? price - atr*1.2 : price + atr*1.2;
-  const tp1  = isBuy ? price + atr*1.8 : price - atr*1.8;
-  const tp2  = isBuy ? price + atr*3.6 : price - atr*3.6;
-  return { sl:sl.toFixed(2), tp1:tp1.toFixed(2), tp2:tp2.toFixed(2) };
+  const sl  = isBuy ? price-atr*1.2 : price+atr*1.2;
+  const tp1 = isBuy ? price+atr*1.8 : price-atr*1.8;
+  const tp2 = isBuy ? price+atr*3.6 : price-atr*3.6;
+  return { sl:sl.toFixed(5), tp1:tp1.toFixed(5), tp2:tp2.toFixed(5) };
 }
 
-const SYMBOLS = {
-  BTC:"BTC-USDT",ETH:"ETH-USDT",SOL:"SOL-USDT",BNB:"BNB-USDT",
-  XRP:"XRP-USDT",DOGE:"DOGE-USDT",ADA:"ADA-USDT",AVAX:"AVAX-USDT",
-  MATIC:"MATIC-USDT",LINK:"LINK-USDT",DOT:"DOT-USDT",
-  UNI:"UNI-USDT",ATOM:"ATOM-USDT",LTC:"LTC-USDT",
+// ── Symbols ────────────────────────────────────────────────
+const CRYPTO = {
+  BTC:"BTC-USDT", ETH:"ETH-USDT", SOL:"SOL-USDT", BNB:"BNB-USDT",
+  XRP:"XRP-USDT", DOGE:"DOGE-USDT", ADA:"ADA-USDT", AVAX:"AVAX-USDT",
+  MATIC:"MATIC-USDT", LINK:"LINK-USDT", DOT:"DOT-USDT",
+  UNI:"UNI-USDT", ATOM:"ATOM-USDT", LTC:"LTC-USDT",
 };
-const COINS_LIST = Object.keys(SYMBOLS).join(", ");
+
+// Forex via ExchangeRate API (free) — we use a different data source
+const FOREX = {
+  "EURUSD":"EUR-USDT", "GBPUSD":"GBP-USDT", "USDJPY":"USDT-JPY",
+  "AUDUSD":"AUC-USDT", "USDCAD":"USDT-KCS",
+};
+
+// Forex pairs we'll fetch from a free forex API
+const FOREX_PAIRS = {
+  "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD", "USDJPY": "USD/JPY",
+  "AUDUSD": "AUD/USD", "USDCAD": "USD/CAD", "USDCHF": "USD/CHF",
+  "NZDUSD": "NZD/USD", "EURGBP": "EUR/GBP",
+};
+
+const SYMBOLS = { ...CRYPTO };
+const ALL_SYMBOLS = { ...CRYPTO, ...Object.fromEntries(Object.keys(FOREX_PAIRS).map(k=>[k,k])) };
+const COINS_LIST = Object.keys(CRYPTO).join(", ");
+const FOREX_LIST = Object.keys(FOREX_PAIRS).join(", ");
 const VALID_TFS = ["1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d","3d","1w"];
 const TF_MAP = {"1m":"1min","3m":"3min","5m":"5min","15m":"15min","30m":"30min","1h":"1hour","2h":"2hour","4h":"4hour","6h":"6hour","8h":"8hour","12h":"12hour","1d":"1day","3d":"3day","1w":"1week"};
 
-async function fetchCandles(symbol, tf) {
+async function fetchCryptoCandles(symbol, tf) {
   const url = `https://api.kucoin.com/api/v1/market/candles?type=${TF_MAP[tf]}&symbol=${symbol}&limit=210`;
   const r = await fetch(url);
   if (!r.ok) throw new Error("KuCoin error " + r.status);
@@ -97,37 +141,61 @@ async function fetchCandles(symbol, tf) {
   return json.data.reverse().map(k=>[k[0],k[1],k[3],k[4],k[2],k[5]]);
 }
 
-async function getAISignal(coin, tf, ind) {
+async function fetchForexCandles(pair, tf) {
+  // Use Twelve Data free API for forex
+  const intervalMap = {"1m":"1min","3m":"3min","5m":"5min","15m":"15min","30m":"30min","1h":"1h","2h":"2h","4h":"4h","1d":"1day","1w":"1week"};
+  const interval = intervalMap[tf] || "1h";
+  const symbol = pair.slice(0,3) + "/" + pair.slice(3);
+  const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${interval}&outputsize=100&apikey=demo`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error("Forex API error " + r.status);
+  const json = await r.json();
+  if (!json.values?.length) throw new Error("No forex data — try again in a moment");
+  // Twelve Data: [{datetime, open, high, low, close, volume}] newest first
+  const klines = json.values.reverse().map(k=>[
+    k.datetime, k.open, k.high, k.low, k.close, k.volume||"0"
+  ]);
+  return klines;
+}
+
+async function getAISignal(coin, tf, ind, session, holdTime) {
   const p = ind.price, a = ind.atr;
   const buyLevels  = calcLevels(p, a, true);
   const sellLevels = calcLevels(p, a, false);
+  const isForex = !!FOREX_PAIRS[coin];
 
-  const prompt = `You are a master crypto trader with 15 years experience and 90%+ win rate.
+  const prompt = `You are a master trader with 15 years experience, 90%+ win rate, trading both crypto and forex.
 
-Analyse ${coin}/USDT on the ${tf} timeframe and give ONE clear signal.
+Analyse ${isForex ? FOREX_PAIRS[coin] : coin+"/USDT"} on the ${tf} timeframe.
+
+MARKET SESSION: ${session.session} | Liquidity: ${session.liquidity}
+SESSION NOTE: ${session.note}
+RECOMMENDED HOLD TIME: ${holdTime}
 
 MARKET DATA:
-Price: $${p.toLocaleString()}
-ATR(14): $${a.toFixed(2)}
+Price: ${p}
+ATR(14): ${a.toFixed(5)}
 RSI: ${ind.rsi} (${ind.rsiState})
 MACD: ${ind.macd} (${ind.macdState})
-SMA20: $${ind.sma20} | SMA50: $${ind.sma50} | Trend: ${ind.trend}
-BB: $${ind.bbLower} – $${ind.bbUpper}
-Support: $${ind.support} | Resistance: $${ind.resistance}
+SMA20: ${ind.sma20} | SMA50: ${ind.sma50} | Trend: ${ind.trend}
+BB: ${ind.bbLower} – ${ind.bbUpper}
+Support: ${ind.support} | Resistance: ${ind.resistance}
 Volume: ${ind.volume}
 Patterns: ${ind.patterns}
 
-If BUY signal: use entry ~$${p.toFixed(2)}, SL ~$${buyLevels.sl}, TP1 ~$${buyLevels.tp1}, TP2 ~$${buyLevels.tp2}
-If SELL signal: use entry ~$${p.toFixed(2)}, SL ~$${sellLevels.sl}, TP1 ~$${sellLevels.tp1}, TP2 ~$${sellLevels.tp2}
-Adjust levels slightly based on key structure. If no clear setup, use NEUTRAL with the same example levels.
+LEVEL GUIDANCE:
+If BUY: entry ~${p}, SL ~${buyLevels.sl}, TP1 ~${buyLevels.tp1}, TP2 ~${buyLevels.tp2}
+If SELL: entry ~${p}, SL ~${sellLevels.sl}, TP1 ~${sellLevels.tp1}, TP2 ~${sellLevels.tp2}
 
-YOU MUST reply with ONLY this exact JSON structure, all fields filled with real numbers:
-{"signal":"BUY","confidence":75,"entry":"${p.toFixed(2)}","stopLoss":"${buyLevels.sl}","takeProfit1":"${buyLevels.tp1}","takeProfit2":"${buyLevels.tp2}","reasoning":"your analysis here in 2-3 sentences","risk":"MEDIUM","timeToHold":"2-4 hours","keyLevel":"${ind.support}"}`;
+IMPORTANT: Account for the ${session.session} session in your analysis. During low liquidity (Asian session), widen targets and warn about slow moves. During London/NY overlap, tighten stops and be more aggressive with targets.
+
+Reply ONLY with raw JSON, all fields with real values:
+{"signal":"BUY","confidence":75,"entry":"${p}","stopLoss":"${buyLevels.sl}","takeProfit1":"${buyLevels.tp1}","takeProfit2":"${buyLevels.tp2}","reasoning":"2-3 sentences including session context","risk":"MEDIUM","timeToHold":"${holdTime}","keyLevel":"${ind.support}","sessionWarning":"any warning about current session"}`;
 
   const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method:"POST",
     headers:{"Content-Type":"application/json","Authorization":`Bearer ${GROQ_API_KEY}`},
-    body:JSON.stringify({model:"llama-3.3-70b-versatile",messages:[{role:"user",content:prompt}],max_tokens:400,temperature:0.1}),
+    body:JSON.stringify({model:"llama-3.3-70b-versatile",messages:[{role:"user",content:prompt}],max_tokens:500,temperature:0.1}),
   });
   const text = await r.text();
   console.log("Groq:", r.status, text.slice(0,300));
@@ -138,42 +206,50 @@ YOU MUST reply with ONLY this exact JSON structure, all fields filled with real 
   if (!match) throw new Error("No JSON returned");
   const sig = JSON.parse(match[0]);
 
-  // Fallback for any missing/zero/null fields
+  // Fallback for nulls/zeros
   const isBuy = ["BUY","STRONG_BUY"].includes(sig.signal);
   const fb = calcLevels(p, a, isBuy);
-  if (!sig.entry    || +sig.entry    <= 0) sig.entry       = p.toFixed(2);
-  if (!sig.stopLoss || +sig.stopLoss <= 0) sig.stopLoss    = fb.sl;
+  if (!sig.entry    ||+sig.entry    <=0) sig.entry       = p.toFixed(5);
+  if (!sig.stopLoss ||+sig.stopLoss <=0) sig.stopLoss    = fb.sl;
   if (!sig.takeProfit1||+sig.takeProfit1<=0) sig.takeProfit1 = fb.tp1;
   if (!sig.takeProfit2||+sig.takeProfit2<=0) sig.takeProfit2 = fb.tp2;
-  if (!sig.confidence || sig.confidence<=0) sig.confidence  = 65;
-  if (!sig.risk)     sig.risk      = "MEDIUM";
-  if (!sig.timeToHold || sig.timeToHold==="0") sig.timeToHold = "2-4 hours";
+  if (!sig.confidence||sig.confidence<=0)    sig.confidence  = 65;
+  if (!sig.risk)     sig.risk       = "MEDIUM";
+  if (!sig.timeToHold||sig.timeToHold==="0") sig.timeToHold = holdTime;
   if (!sig.reasoning) sig.reasoning = "Signal based on technical indicator confluence.";
-
   return sig;
 }
 
-function formatSignal(coin, tf, sig, ind, pos) {
+function formatSignal(coin, tf, sig, ind, pos, session, holdTime) {
+  const isForex = !!FOREX_PAIRS[coin];
+  const pair = isForex ? FOREX_PAIRS[coin] : coin+"/USDT";
   const emoji = {STRONG_BUY:"🟢🟢",BUY:"🟢",NEUTRAL:"⚪️",SELL:"🔴",STRONG_SELL:"🔴🔴"}[sig.signal]||"⚪️";
   const riskEmoji = {LOW:"🟢",MEDIUM:"🟡",HIGH:"🔴"}[sig.risk]||"🟡";
-  const conf = Math.min(Math.max(parseInt(sig.confidence)||65, 0), 100);
+  const liqEmoji = {HIGH:"🟢","VERY HIGH":"🟢🟢",MEDIUM:"🟡",LOW:"🔴","VERY LOW":"🔴🔴"}[session.liquidity]||"🟡";
+  const conf = Math.min(Math.max(parseInt(sig.confidence)||65,0),100);
   const bar = "█".repeat(Math.round(conf/10))+"░".repeat(10-Math.round(conf/10));
-  return `${emoji} *${sig.signal}* — ${coin}/USDT ${tf.toUpperCase()}
+
+  return `${emoji} *${sig.signal}* — ${pair} ${tf.toUpperCase()}
 ━━━━━━━━━━━━━━━━━━
-💰 *Price:* $${parseFloat(ind.price).toLocaleString()}
+🕐 *Session:* ${session.session} ${liqEmoji} ${session.liquidity} liquidity
+⏱ *Suggested Hold:* ${holdTime}
+${sig.sessionWarning ? `⚠️ ${sig.sessionWarning}` : ""}
+━━━━━━━━━━━━━━━━━━
+💰 *Price:* ${parseFloat(ind.price).toLocaleString()}
 ⚡ *Confidence:* ${conf}% ${bar}
-${riskEmoji} *Risk:* ${sig.risk} | ⏱ *Hold:* ${sig.timeToHold}
+${riskEmoji} *Risk:* ${sig.risk}
 ━━━━━━━━━━━━━━━━━━
-📍 *Entry:* $${sig.entry}
-🛑 *Stop Loss:* $${sig.stopLoss}
-🎯 *TP1:* $${sig.takeProfit1}
-🏆 *TP2:* $${sig.takeProfit2}
-🔑 *Key Level:* $${sig.keyLevel||ind.support}
+📍 *Entry:* ${sig.entry}
+🛑 *Stop Loss:* ${sig.stopLoss}
+🎯 *TP1:* ${sig.takeProfit1}
+🏆 *TP2:* ${sig.takeProfit2}
+🔑 *Key Level:* ${sig.keyLevel||ind.support}
 ━━━━━━━━━━━━━━━━━━
-💼 *Position Size (1% risk):*
-• Risk: $${pos.risk}
-• Size: ${pos.size} ${coin}
-• Value: $${pos.value} (${pos.pct}% of balance)
+💼 *Position Size (1% risk, 1:500 leverage):*
+• Risk Amount: $${pos.risk}
+• Size: ${pos.size} ${isForex ? pair.replace("/","") : coin}
+• Position Value: $${pos.value}
+• Margin Used: $${pos.margin} (${pos.marginPct}% of balance)
 ━━━━━━━━━━━━━━━━━━
 📊 *Analysis:*
 ${sig.reasoning}
@@ -182,11 +258,11 @@ ${sig.reasoning}
 • RSI: ${ind.rsi} (${ind.rsiState})
 • MACD: ${ind.macdState}
 • Trend: ${ind.trend}
-• ATR: $${ind.atr.toFixed(2)}
+• ATR: ${ind.atr.toFixed(5)}
 • Volume: ${ind.volume}
 • Patterns: ${ind.patterns}
 
-_Not financial advice. Always manage your risk._`;
+_Not financial advice. Always use stop losses._`;
 }
 
 async function send(chatId, text) {
@@ -197,25 +273,28 @@ async function send(chatId, text) {
   const d = await r.json();
   if (!d.ok) console.error("Send error:", JSON.stringify(d));
 }
-
 async function typing(chatId) {
-  await fetch(`${TG}/sendChatAction`,{
-    method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({chat_id:chatId,action:"typing"}),
-  });
+  await fetch(`${TG}/sendChatAction`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat_id:chatId,action:"typing"})});
 }
 
 const HELP = `🤖 *SignalAI — Master Trader Bot*
 
-Type a coin and timeframe:
-• \`BTC 1h\`
-• \`ETH 4h\`
-• \`SOL 15m\`
+Type a pair and timeframe:
+*Crypto:*
+• \`BTC 1h\` • \`ETH 4h\` • \`SOL 15m\`
 
-I'll ask your balance then send a full signal with position sizing.
+*Forex:*
+• \`EURUSD 1h\` • \`GBPUSD 4h\` • \`USDJPY 1d\`
 
-*Minimum balance: €50*
-*Coins:* ${COINS_LIST}
+Every signal includes:
+✅ Session-aware hold time (accounts for Asian/London/NY hours)
+✅ Entry, Stop Loss, TP1 & TP2
+✅ Position size for your balance (1:500 leverage)
+✅ 1% risk per trade
+✅ Session warning if liquidity is low
+
+*Crypto:* ${COINS_LIST}
+*Forex:* ${FOREX_LIST}
 *Timeframes:* ${VALID_TFS.join(", ")}`;
 
 let offset = 0;
@@ -236,30 +315,31 @@ async function poll() {
       const upper = text.toUpperCase();
       console.log(`[${chatId}] "${text}"`);
 
-      // Commands
-      if (upper==="/START"||upper==="/HELP") {
-        sessions[chatId] = null;
-        await send(chatId, HELP);
-        continue;
-      }
+      if (upper==="/START"||upper==="/HELP") { sessions[chatId]=null; await send(chatId,HELP); continue; }
 
       // Awaiting balance
       if (sessions[chatId]?.step==="awaiting_balance") {
         const balance = parseFloat(text.replace(/[^0-9.]/g,""));
         if (isNaN(balance)||balance<50) {
-          await send(chatId,"❌ Minimum is €50. Enter a number like `100` or `500`");
+          await send(chatId,"❌ Minimum is €50. Just type a number like `100` or `500`");
           continue;
         }
         const {coin,tf} = sessions[chatId];
         sessions[chatId] = null;
+        const isForex = !!FOREX_PAIRS[coin];
+        const pair = isForex ? FOREX_PAIRS[coin] : coin+"/USDT";
         await typing(chatId);
-        await send(chatId,`🔍 Analysing *${coin}* ${tf.toUpperCase()} with $${balance.toLocaleString()} balance...`);
+        await send(chatId,`🔍 Analysing *${pair}* ${tf.toUpperCase()} with $${balance.toLocaleString()} balance...`);
         try {
-          const klines = await fetchCandles(SYMBOLS[coin], tf);
+          const session = getMarketSession();
+          const holdTime = getSmartHoldTime(tf, session);
+          const klines = isForex
+            ? await fetchForexCandles(coin, tf)
+            : await fetchCryptoCandles(CRYPTO[coin], tf);
           const ind = getIndicators(klines);
           const pos = calcPosition(balance, ind.price, ind.atr);
-          const sig = await getAISignal(coin, tf, ind);
-          await send(chatId, formatSignal(coin, tf, sig, ind, pos));
+          const sig = await getAISignal(coin, tf, ind, session, holdTime);
+          await send(chatId, formatSignal(coin, tf, sig, ind, pos, session, holdTime));
         } catch(e) {
           console.error("Error:", e.message);
           await send(chatId,`❌ Error: ${e.message}`);
@@ -267,23 +347,22 @@ async function poll() {
         continue;
       }
 
-      // Parse coin + timeframe
+      // Parse pair + tf
       const parts = upper.split(/\s+/);
-      const coin = parts[0].replace(/\/(USDT|USD)/,"").replace(/-(USDT|USD)/,"");
+      const coin = parts[0].replace(/\//,"");
       const tf = (parts[1]||"1H").toLowerCase();
 
-      if (!SYMBOLS[coin]) {
-        await send(chatId,`❌ Unknown coin *${coin}*\n\nSupported: ${COINS_LIST}\n\nExample: \`BTC 1h\``);
+      if (!CRYPTO[coin] && !FOREX_PAIRS[coin]) {
+        await send(chatId,`❌ Unknown pair: *${coin}*\n\n*Crypto:* ${COINS_LIST}\n*Forex:* ${FOREX_LIST}`);
         continue;
       }
       if (!VALID_TFS.includes(tf)) {
-        await send(chatId,`❌ Unknown timeframe *${tf}*\n\nSupported: ${VALID_TFS.join(", ")}`);
+        await send(chatId,`❌ Unknown timeframe: *${tf}*\n\nSupported: ${VALID_TFS.join(", ")}`);
         continue;
       }
 
-      // Ask balance
       sessions[chatId] = {step:"awaiting_balance", coin, tf};
-      await send(chatId,`💼 *${coin} ${tf.toUpperCase()} signal*\n\nWhat is your trading balance? (min €50)\n\nJust type the number:\n\`100\` or \`500\` or \`2000\``);
+      await send(chatId,`💼 *${coin} ${tf.toUpperCase()} signal*\n\nWhat is your trading balance? (min €50)\n\nJust type the number e.g. \`100\` or \`500\``);
     }
   } catch(e) { console.error("Poll error:", e.message); }
   setTimeout(poll,1000);
