@@ -8,7 +8,6 @@ console.log("Bot starting...");
 console.log("Telegram token set:", !!TELEGRAM_TOKEN);
 console.log("Groq key set:", !!GROQ_API_KEY);
 
-// Store user sessions: { chatId: { step, coin, tf, balance } }
 const sessions = {};
 
 function calcRSI(closes, p = 14) {
@@ -43,48 +42,59 @@ function getIndicators(klines) {
   const avgV = v.slice(-20).reduce((a, b) => a + b) / 20;
 
   // ATR
-  const trueRanges = [];
+  const tr = [];
   for (let i = 1; i < klines.length; i++) {
-    const hi = h[i], lo = l[i], pc = c[i-1];
-    trueRanges.push(Math.max(hi - lo, Math.abs(hi - pc), Math.abs(lo - pc)));
+    tr.push(Math.max(h[i]-l[i], Math.abs(h[i]-c[i-1]), Math.abs(l[i]-c[i-1])));
   }
-  const atr = trueRanges.slice(-14).reduce((a, b) => a + b) / 14;
+  const atr = tr.slice(-14).reduce((a, b) => a + b) / 14;
 
   // Stoch RSI
-  const rsiValues = [];
+  const rsiArr = [];
   for (let i = 14; i < c.length; i++) {
-    const slice = c.slice(i - 14, i);
+    const sl = c.slice(i-14, i);
     let g = 0, lo = 0;
-    for (let j = 1; j < slice.length; j++) {
-      const d = slice[j] - slice[j-1];
-      d > 0 ? g += d : lo += Math.abs(d);
-    }
-    rsiValues.push(100 - 100 / (1 + (g/14) / ((lo/14) || 0.0001)));
+    for (let j = 1; j < sl.length; j++) { const d = sl[j]-sl[j-1]; d>0?g+=d:lo+=Math.abs(d); }
+    rsiArr.push(100 - 100/(1+(g/14)/((lo/14)||0.0001)));
   }
-  const rsiSlice = rsiValues.slice(-14);
-  const rsiMin = Math.min(...rsiSlice), rsiMax = Math.max(...rsiSlice);
-  const stochRSI = rsiMax === rsiMin ? 50 : ((rsiValues[rsiValues.length-1] - rsiMin) / (rsiMax - rsiMin)) * 100;
+  const rs = rsiArr.slice(-14);
+  const rMin = Math.min(...rs), rMax = Math.max(...rs);
+  const stochRSI = rMax===rMin ? 50 : ((rsiArr[rsiArr.length-1]-rMin)/(rMax-rMin))*100;
 
-  // Candle patterns
-  const lastC = { o: +klines[klines.length-1][1], h: h[h.length-1], l: l[l.length-1], c: last };
-  const prevC = { o: +klines[klines.length-2][1], h: h[h.length-2], l: l[l.length-2], c: c[c.length-2] };
+  // Patterns
+  const lc = { o:+klines[klines.length-1][1], h:h[h.length-1], l:l[l.length-1], c:last };
+  const pc = { o:+klines[klines.length-2][1], h:h[h.length-2], l:l[l.length-2], c:c[c.length-2] };
   const patterns = [];
-  if (lastC.c > lastC.o && prevC.c < prevC.o && lastC.o < prevC.c && lastC.c > prevC.o) patterns.push("Bullish Engulfing");
-  if (lastC.c < lastC.o && prevC.c > prevC.o && lastC.o > prevC.c && lastC.c < prevC.o) patterns.push("Bearish Engulfing");
-  if ((Math.min(lastC.o,lastC.c) - lastC.l) > Math.abs(lastC.o-lastC.c)*2 && (lastC.h - Math.max(lastC.o,lastC.c)) < Math.abs(lastC.o-lastC.c)*0.3) patterns.push("Hammer");
-  if (Math.abs(lastC.o-lastC.c) < (lastC.h-lastC.l)*0.1) patterns.push("Doji");
+  if (lc.c>lc.o && pc.c<pc.o && lc.o<pc.c && lc.c>pc.o) patterns.push("Bullish Engulfing");
+  if (lc.c<lc.o && pc.c>pc.o && lc.o>pc.c && lc.c<pc.o) patterns.push("Bearish Engulfing");
+  if ((Math.min(lc.o,lc.c)-lc.l)>Math.abs(lc.o-lc.c)*2 && (lc.h-Math.max(lc.o,lc.c))<Math.abs(lc.o-lc.c)*0.3) patterns.push("Hammer");
+  if (Math.abs(lc.o-lc.c)<(lc.h-lc.l)*0.1) patterns.push("Doji");
 
   return {
     price: last, atr,
-    rsi: rsi.toFixed(1), rsiState: rsi < 30 ? "OVERSOLD" : rsi > 70 ? "OVERBOUGHT" : "NEUTRAL",
-    stochRSI: stochRSI.toFixed(1), stochState: stochRSI < 20 ? "OVERSOLD" : stochRSI > 80 ? "OVERBOUGHT" : "NEUTRAL",
-    macd: (e12-e26).toFixed(4), macdState: e12>e26 ? "BULLISH" : "BEARISH",
+    rsi: rsi.toFixed(1), rsiState: rsi<30?"OVERSOLD":rsi>70?"OVERBOUGHT":"NEUTRAL",
+    stochRSI: stochRSI.toFixed(1), stochState: stochRSI<20?"OVERSOLD":stochRSI>80?"OVERBOUGHT":"NEUTRAL",
+    macd: (e12-e26).toFixed(4), macdState: e12>e26?"BULLISH":"BEARISH",
     ema9: e9.toFixed(2), sma20: s20.toFixed(2), sma50: s50.toFixed(2), sma200: s200.toFixed(2),
-    trend: last > s50 ? (last > s200 ? "STRONG UPTREND" : "WEAK UPTREND") : (last < s200 ? "STRONG DOWNTREND" : "WEAK DOWNTREND"),
+    trend: last>s50?(last>s200?"STRONG UPTREND":"WEAK UPTREND"):(last<s200?"STRONG DOWNTREND":"WEAK DOWNTREND"),
     bbUpper: (bm+2*bs).toFixed(2), bbMiddle: bm.toFixed(2), bbLower: (bm-2*bs).toFixed(2),
     support: Math.min(...l.slice(-20)).toFixed(2), resistance: Math.max(...h.slice(-20)).toFixed(2),
-    volume: v[v.length-1] > avgV*1.5 ? "VERY HIGH" : v[v.length-1] > avgV*1.2 ? "HIGH" : v[v.length-1] < avgV*0.5 ? "VERY LOW" : v[v.length-1] < avgV*0.8 ? "LOW" : "NORMAL",
+    volume: v[v.length-1]>avgV*1.5?"VERY HIGH":v[v.length-1]>avgV*1.2?"HIGH":v[v.length-1]<avgV*0.5?"VERY LOW":v[v.length-1]<avgV*0.8?"LOW":"NORMAL",
     patterns: patterns.length ? patterns.join(", ") : "None detected",
+  };
+}
+
+// Position sizing — calculated in code, NOT by AI
+function calcPositionSize(balance, price, atr) {
+  const riskAmount = balance * 0.01; // 1% risk
+  const slDistance = atr * 1.2; // 1.2x ATR stop
+  const positionSize = riskAmount / slDistance;
+  const positionValue = positionSize * price;
+  return {
+    riskAmount: riskAmount.toFixed(2),
+    slDistance: slDistance.toFixed(2),
+    positionSize: positionSize.toFixed(6),
+    positionValue: positionValue.toFixed(2),
+    percentOfBalance: ((positionValue / balance) * 100).toFixed(1),
   };
 }
 
@@ -107,25 +117,14 @@ async function fetchCandles(symbol, tf) {
   return json.data.reverse().map(k => [k[0],k[1],k[3],k[4],k[2],k[5]]);
 }
 
-async function getAISignal(coin, tf, ind, balance) {
-  // Risk management: 1% of balance per trade
-  const riskAmount = balance * 0.01;
-  const stopLossDistance = ind.atr * 1.2;
-  const positionSize = riskAmount / stopLossDistance;
-  const positionValue = positionSize * ind.price;
-  const leverage = Math.min(Math.ceil(positionValue / balance), 10); // suggest leverage if needed
-
-  const prompt = `You are a master crypto trader with 15 years experience and 90%+ win rate. You are known for:
-- Extremely precise entries with tight stop losses (1-1.5x ATR max)
-- Only taking high probability setups with strong confluence
-- Perfect risk/reward (minimum 1:2, preferring 1:3+)
-- Never risking more than 1% of account per trade
-- Reading market structure and momentum together
+async function getAISignal(coin, tf, ind) {
+  // AI only gives: signal, confidence, entry, stopLoss, TP1, TP2, reasoning, risk, timeToHold, keyLevel
+  // Position sizing is calculated separately in code
+  const prompt = `You are a master crypto trader with 15 years experience and 90%+ win rate.
 
 Analyse ${coin}/USDT on the ${tf} timeframe.
 
-=== MARKET DATA ===
-Price: $${ind.price.toLocaleString()}
+PRICE: $${ind.price.toLocaleString()}
 ATR(14): $${ind.atr.toFixed(2)}
 
 MOMENTUM:
@@ -137,54 +136,63 @@ TREND:
 - EMA9: $${ind.ema9} | SMA20: $${ind.sma20} | SMA50: $${ind.sma50} | SMA200: $${ind.sma200}
 - Overall: ${ind.trend}
 
-VOLATILITY:
-- BB Upper: $${ind.bbUpper} | Mid: $${ind.bbMiddle} | Lower: $${ind.bbLower}
-
-KEY LEVELS:
+LEVELS:
+- BB: $${ind.bbLower} – $${ind.bbUpper}
 - Support: $${ind.support} | Resistance: $${ind.resistance}
 
 VOLUME: ${ind.volume}
-CANDLE PATTERNS: ${ind.patterns}
+PATTERNS: ${ind.patterns}
 
-=== ACCOUNT ===
-Balance: $${balance.toLocaleString()}
-Risk per trade (1%): $${riskAmount.toFixed(2)}
-ATR-based stop distance: $${stopLossDistance.toFixed(2)}
-Suggested position size: ${positionSize.toFixed(4)} ${coin} (~$${positionValue.toFixed(2)})
+RULES:
+- Stop loss must be within 1.5x ATR ($${(ind.atr*1.5).toFixed(2)}) of entry
+- TP1 = minimum 1.5x risk from entry
+- TP2 = minimum 3x risk from entry
+- Use NEUTRAL if no clear setup
 
-Give your highest conviction signal only. Use NEUTRAL if confluence is weak.
-Stop loss: max 1.5x ATR from entry, placed at structural level.
-TP1: 1.5x risk. TP2: 3x risk.
-
-Reply ONLY with raw JSON:
-{"signal":"BUY","confidence":85,"entry":"${ind.price.toFixed(2)}","stopLoss":"price","takeProfit1":"price","takeProfit2":"price","reasoning":"precise explanation","risk":"LOW","timeToHold":"duration","riskReward":"1:3","keyLevel":"price","positionSize":"${positionSize.toFixed(4)} ${coin}","positionValue":"$${positionValue.toFixed(2)}","riskAmount":"$${riskAmount.toFixed(2)}","suggestion":"any extra advice"}`;
+Reply with ONLY this JSON, real prices filled in, no zeros:
+{"signal":"BUY","confidence":78,"entry":"${ind.price.toFixed(2)}","stopLoss":"${(ind.price - ind.atr*1.2).toFixed(2)}","takeProfit1":"${(ind.price + ind.atr*1.8).toFixed(2)}","takeProfit2":"${(ind.price + ind.atr*3.6).toFixed(2)}","reasoning":"your analysis here","risk":"MEDIUM","timeToHold":"2-4 hours","keyLevel":"${ind.support}"}`;
 
   const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${GROQ_API_KEY}` },
-    body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [{ role: "user", content: prompt }], max_tokens: 700, temperature: 0.2 }),
+    body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [{ role: "user", content: prompt }], max_tokens: 500, temperature: 0.2 }),
   });
   const text = await r.text();
-  console.log("Groq status:", r.status, text.slice(0, 200));
+  console.log("Groq status:", r.status, text.slice(0, 300));
   if (!r.ok) throw new Error("Groq error " + r.status);
   const d = JSON.parse(text);
   const content = d.choices[0].message.content.trim();
   const match = content.match(/\{[\s\S]*\}/);
   if (!match) throw new Error("No JSON from AI");
-  return JSON.parse(match[0]);
+  const sig = JSON.parse(match[0]);
+
+  // Validate — if AI returned 0 or bad values, use ATR-based fallback
+  const price = ind.price;
+  const atr = ind.atr;
+  const isBuy = ["BUY","STRONG_BUY"].includes(sig.signal);
+  if (!sig.entry || +sig.entry === 0) sig.entry = price.toFixed(2);
+  if (!sig.stopLoss || +sig.stopLoss === 0) sig.stopLoss = isBuy ? (price - atr*1.2).toFixed(2) : (price + atr*1.2).toFixed(2);
+  if (!sig.takeProfit1 || +sig.takeProfit1 === 0) sig.takeProfit1 = isBuy ? (price + atr*1.8).toFixed(2) : (price - atr*1.8).toFixed(2);
+  if (!sig.takeProfit2 || +sig.takeProfit2 === 0) sig.takeProfit2 = isBuy ? (price + atr*3.6).toFixed(2) : (price - atr*3.6).toFixed(2);
+  if (!sig.confidence || sig.confidence === 0) sig.confidence = 60;
+  if (!sig.timeToHold || sig.timeToHold === "0") sig.timeToHold = "2-4 hours";
+
+  return sig;
 }
 
-function formatSignal(coin, tf, sig, ind) {
+function formatSignal(coin, tf, sig, ind, pos) {
   const emoji = { STRONG_BUY:"🟢🟢", BUY:"🟢", NEUTRAL:"⚪️", SELL:"🔴", STRONG_SELL:"🔴🔴" }[sig.signal] || "⚪️";
   const riskEmoji = { LOW:"🟢", MEDIUM:"🟡", HIGH:"🔴" }[sig.risk] || "🟡";
-  const confBar = "█".repeat(Math.round(sig.confidence/10)) + "░".repeat(10-Math.round(sig.confidence/10));
+  const conf = Math.min(Math.max(sig.confidence, 0), 100);
+  const confBar = "█".repeat(Math.round(conf/10)) + "░".repeat(10-Math.round(conf/10));
+  const rr = sig.riskReward || "1:2";
 
   return `${emoji} *${sig.signal}* — ${coin}/USDT ${tf.toUpperCase()}
 ━━━━━━━━━━━━━━━━━━
 💰 *Price:* $${parseFloat(ind.price).toLocaleString()}
-⚡ *Confidence:* ${sig.confidence}% ${confBar}
-${riskEmoji} *Risk:* ${sig.risk} | ⏱ *Hold:* ${sig.timeToHold}
-📐 *Risk/Reward:* ${sig.riskReward || "1:2"}
+⚡ *Confidence:* ${conf}% ${confBar}
+${riskEmoji} *Risk:* ${sig.risk || "MEDIUM"} | ⏱ *Hold:* ${sig.timeToHold}
+📐 *Risk/Reward:* ${rr}
 ━━━━━━━━━━━━━━━━━━
 📍 *Entry:* $${sig.entry}
 🛑 *Stop Loss:* $${sig.stopLoss}
@@ -193,13 +201,12 @@ ${riskEmoji} *Risk:* ${sig.risk} | ⏱ *Hold:* ${sig.timeToHold}
 ${sig.keyLevel ? `🔑 *Key Level:* $${sig.keyLevel}` : ""}
 ━━━━━━━━━━━━━━━━━━
 💼 *Position Sizing (1% risk):*
-• Risk Amount: ${sig.riskAmount}
-• Position Size: ${sig.positionSize}
-• Position Value: ${sig.positionValue}
+• Risk Amount: $${pos.riskAmount}
+• Position Size: ${pos.positionSize} ${coin}
+• Position Value: $${pos.positionValue} (${pos.percentOfBalance}% of balance)
 ━━━━━━━━━━━━━━━━━━
-📊 *Master Analysis:*
+📊 *Analysis:*
 ${sig.reasoning}
-${sig.suggestion ? `\n💡 *Pro Tip:* ${sig.suggestion}` : ""}
 ━━━━━━━━━━━━━━━━━━
 📈 *Indicators:*
 • RSI: ${ind.rsi} (${ind.rsiState})
@@ -234,17 +241,19 @@ async function sendTyping(chatId) {
 const HELP = `🤖 *SignalAI — Master Trader Bot*
 
 Send a signal request like:
-• \`BTC 1h\` — and I'll ask your balance
+• \`BTC 1h\`
 • \`ETH 4h\`
 • \`SOL 15m\`
 
-Every signal includes:
-✅ Tight entry & stop loss (ATR-based)
-✅ TP1 & TP2 with risk/reward ratio
-✅ Position size calculated for your balance
+I'll ask your balance then give you:
+✅ Entry, Stop Loss, TP1 & TP2
+✅ Exact position size for your balance
 ✅ 1% risk management per trade
-✅ RSI, Stoch RSI, MACD, ATR analysis
+✅ ATR-based tight stop losses
+✅ RSI, Stoch RSI, MACD analysis
 ✅ Candle pattern detection
+
+*Minimum balance: €50*
 
 *Coins:* ${COINS_LIST}
 *Timeframes:* ${VALID_TFS.join(", ")}`;
@@ -267,18 +276,17 @@ async function poll() {
       const upper = text.toUpperCase();
       console.log(`[${chatId}] ${text}`);
 
-      // Handle /start /help
       if (upper === "/START" || upper === "/HELP") {
         sessions[chatId] = null;
         await sendMessage(chatId, HELP);
         continue;
       }
 
-      // Check if user is in a session waiting for balance
+      // Awaiting balance
       if (sessions[chatId]?.step === "awaiting_balance") {
-        const balance = parseFloat(text.replace(/[$,€£]/g, ""));
-        if (isNaN(balance) || balance <= 0) {
-          await sendMessage(chatId, "❌ Please enter a valid amount, e.g. `500` or `1200`");
+        const balance = parseFloat(text.replace(/[$,€£\s]/g, ""));
+        if (isNaN(balance) || balance < 50) {
+          await sendMessage(chatId, "❌ Minimum balance is €50. Please enter a valid amount e.g. `50`, `300` or `1000`");
           continue;
         }
         const { coin, tf } = sessions[chatId];
@@ -290,8 +298,9 @@ async function poll() {
         try {
           const klines = await fetchCandles(SYMBOLS[coin], tf);
           const ind = getIndicators(klines);
-          const sig = await getAISignal(coin, tf, ind, balance);
-          await sendMessage(chatId, formatSignal(coin, tf, sig, ind));
+          const pos = calcPositionSize(balance, ind.price, ind.atr);
+          const sig = await getAISignal(coin, tf, ind);
+          await sendMessage(chatId, formatSignal(coin, tf, sig, ind, pos));
         } catch(e) {
           console.error("Signal error:", e.message);
           await sendMessage(chatId, `❌ Error: ${e.message}`);
@@ -299,7 +308,7 @@ async function poll() {
         continue;
       }
 
-      // Parse coin + timeframe
+      // Parse coin + tf
       const parts = upper.split(/\s+/);
       const coin = parts[0].replace("/USDT","").replace("-USDT","");
       const tf = (parts[1] || "1H").toLowerCase();
@@ -313,9 +322,8 @@ async function poll() {
         continue;
       }
 
-      // Ask for balance
       sessions[chatId] = { step: "awaiting_balance", coin, tf };
-      await sendMessage(chatId, `💼 *${coin} ${tf.toUpperCase()} signal requested*\n\nHow much is your trading balance? (in USD)\n\nExample: \`500\` or \`2000\`\n\n_I'll calculate the perfect position size for 1% risk per trade._`);
+      await sendMessage(chatId, `💼 *${coin} ${tf.toUpperCase()} signal requested*\n\nWhat is your trading balance? (minimum €50)\n\nExample: \`50\` or \`300\` or \`1000\`\n\n_I'll calculate the exact position size using 1% risk per trade._`);
     }
   } catch(e) { console.error("Poll error:", e.message); }
   setTimeout(poll, 1000);
