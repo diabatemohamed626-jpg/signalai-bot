@@ -78,15 +78,17 @@ function getIndicators(klines) {
 }
 
 // ── Position sizing ────────────────────────────────────────
-function calcPosition(balance, price, atr) {
-  const LEVERAGE = 500;
+function calcPosition(balance, price, atr, leverage=1) {
   const risk = balance * 0.01;
   const slDist = atr * 1.2;
   let size = risk / slDist;
   let value = size * price;
-  const maxValue = balance * LEVERAGE * 0.10;
+  // Cap at 20% of total buying power
+  const maxValue = balance * leverage * 0.20;
   if (value > maxValue) { value = maxValue; size = value / price; }
-  const margin = value / LEVERAGE;
+  // If no leverage, never exceed 20% of balance
+  if (leverage === 1 && value > balance * 0.20) { value = balance * 0.20; size = value / price; }
+  const margin = value / leverage;
   const marginPct = (margin / balance) * 100;
   return {
     risk: risk.toFixed(2),
@@ -220,7 +222,7 @@ Reply ONLY with raw JSON, all fields with real values:
   return sig;
 }
 
-function formatSignal(coin, tf, sig, ind, pos, session, holdTime) {
+function formatSignal(coin, tf, sig, ind, pos, session, holdTime, leverage=1) {
   const isForex = !!FOREX_PAIRS[coin];
   const pair = isForex ? FOREX_PAIRS[coin] : coin+"/USDT";
   const emoji = {STRONG_BUY:"🟢🟢",BUY:"🟢",NEUTRAL:"⚪️",SELL:"🔴",STRONG_SELL:"🔴🔴"}[sig.signal]||"⚪️";
@@ -245,7 +247,7 @@ ${riskEmoji} *Risk:* ${sig.risk}
 🏆 *TP2:* ${sig.takeProfit2}
 🔑 *Key Level:* ${sig.keyLevel||ind.support}
 ━━━━━━━━━━━━━━━━━━
-💼 *Position Size (1% risk, 1:500 leverage):*
+💼 *Position Size (1% risk, 1:${leverage} leverage):*
 • Risk Amount: $${pos.risk}
 • Size: ${pos.size} ${isForex ? pair.replace("/","") : coin}
 • Position Value: $${pos.value}
@@ -325,11 +327,15 @@ async function poll() {
           continue;
         }
         const {coin,tf} = sessions[chatId];
-        sessions[chatId] = null;
-        const isForex = !!FOREX_PAIRS[coin];
-        const pair = isForex ? FOREX_PAIRS[coin] : coin+"/USDT";
-        await typing(chatId);
-        await send(chatId,`🔍 Analysing *${pair}* ${tf.toUpperCase()} with $${balance.toLocaleString()} balance...`);
+        sessions[chatId] = {step:"awaiting_leverage", coin, tf, balance};
+        await send(chatId,`✅ Balance: $${balance.toLocaleString()}
+
+What is your account leverage?
+
+Examples: \`10\` (1:10) or \`100\` (1:100) or \`500\` (1:500)
+
+Type \`1\` if no leverage (spot trading)`);
+        continue;
         try {
           const session = getMarketSession();
           const holdTime = getSmartHoldTime(tf, session);
@@ -337,9 +343,39 @@ async function poll() {
             ? await fetchForexCandles(coin, tf)
             : await fetchCryptoCandles(CRYPTO[coin], tf);
           const ind = getIndicators(klines);
-          const pos = calcPosition(balance, ind.price, ind.atr);
+          const pos = calcPosition(balance, ind.price, ind.atr, 1);
           const sig = await getAISignal(coin, tf, ind, session, holdTime);
-          await send(chatId, formatSignal(coin, tf, sig, ind, pos, session, holdTime));
+          await send(chatId, formatSignal(coin, tf, sig, ind, pos, session, holdTime, 1));
+        } catch(e) {
+          console.error("Error:", e.message);
+          await send(chatId,`❌ Error: ${e.message}`);
+        }
+        continue;
+      }
+
+      // Awaiting leverage
+      if (sessions[chatId]?.step==="awaiting_leverage") {
+        const leverage = parseFloat(text.replace(/[^0-9.]/g,""));
+        if (isNaN(leverage)||leverage<1) {
+          await send(chatId,"❌ Please enter a valid leverage e.g. `10` or `500`. Type `1` for no leverage.");
+          continue;
+        }
+        const {coin,tf,balance} = sessions[chatId];
+        sessions[chatId] = null;
+        const isForex = !!FOREX_PAIRS[coin];
+        const pair = isForex ? FOREX_PAIRS[coin] : coin+"/USDT";
+        await typing(chatId);
+        await send(chatId,`🔍 Analysing *${pair}* ${tf.toUpperCase()} — Balance: $${balance.toLocaleString()} | Leverage: 1:${leverage}...`);
+        try {
+          const session = getMarketSession();
+          const holdTime = getSmartHoldTime(tf, session);
+          const klines = isForex
+            ? await fetchForexCandles(coin, tf)
+            : await fetchCryptoCandles(CRYPTO[coin], tf);
+          const ind = getIndicators(klines);
+          const pos = calcPosition(balance, ind.price, ind.atr, leverage);
+          const sig = await getAISignal(coin, tf, ind, session, holdTime);
+          await send(chatId, formatSignal(coin, tf, sig, ind, pos, session, holdTime, leverage));
         } catch(e) {
           console.error("Error:", e.message);
           await send(chatId,`❌ Error: ${e.message}`);
