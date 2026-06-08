@@ -2,7 +2,6 @@ import fetch from "node-fetch";
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-
 const TG = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
 console.log("Bot starting...");
@@ -16,8 +15,7 @@ function calcRSI(closes, p = 14) {
     const d = closes[i] - closes[i - 1];
     d > 0 ? (g += d) : (l += Math.abs(d));
   }
-  const rs = (g / p) / ((l / p) || 0.0001);
-  return 100 - 100 / (1 + rs);
+  return 100 - 100 / (1 + (g / p) / ((l / p) || 0.0001));
 }
 function calcEMA(arr, p) {
   const k = 2 / (p + 1);
@@ -50,20 +48,27 @@ function getIndicators(klines) {
     bbLower: (bm - 2 * bs).toFixed(2),
     support: Math.min(...l.slice(-20)).toFixed(2),
     resistance: Math.max(...h.slice(-20)).toFixed(2),
-    volume: v[v.length - 1] > avgV * 1.2 ? "HIGH" : v[v.length - 1] < avgV * 0.8 ? "LOW" : "NORMAL",
+    volume: v[v.length-1] > avgV*1.2 ? "HIGH" : v[v.length-1] < avgV*0.8 ? "LOW" : "NORMAL",
   };
 }
 
 const SYMBOLS = {
-  BTC: "BTCUSDT", ETH: "ETHUSDT", SOL: "SOLUSDT",
-  BNB: "BNBUSDT", XRP: "XRPUSDT", DOGE: "DOGEUSDT", ADA: "ADAUSDT",
+  BTC: "BTC-USDT", ETH: "ETH-USDT", SOL: "SOL-USDT",
+  BNB: "BNB-USDT", XRP: "XRP-USDT", DOGE: "DOGE-USDT", ADA: "ADA-USDT",
 };
 
+// KuCoin — no geo restrictions
 async function fetchSignal(symbol, tf) {
   console.log(`Fetching candles for ${symbol} ${tf}`);
-  const r = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${tf}&limit=100`);
-  if (!r.ok) throw new Error("Binance error " + r.status);
-  const klines = await r.json();
+  const tfMap = { "15m": "15min", "1h": "1hour", "4h": "4hour", "1d": "1day" };
+  const kucoinTf = tfMap[tf] || "1hour";
+  const url = `https://api.kucoin.com/api/v1/market/candles?type=${kucoinTf}&symbol=${symbol}&limit=100`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error("KuCoin error " + r.status);
+  const json = await r.json();
+  if (!json.data || !json.data.length) throw new Error("No candle data");
+  // KuCoin: [time, open, close, high, low, volume] newest first — reverse and remap to [t,o,h,l,c,v]
+  const klines = json.data.reverse().map(k => [k[0], k[1], k[3], k[4], k[2], k[5]]);
   console.log(`Got ${klines.length} candles`);
   return getIndicators(klines);
 }
@@ -84,31 +89,26 @@ Reply with ONLY raw JSON no markdown:
 
   const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${GROQ_API_KEY}`,
-    },
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${GROQ_API_KEY}` },
     body: JSON.stringify({
       model: "llama-3.3-70b-versatile",
       messages: [{ role: "user", content: prompt }],
-      max_tokens: 400,
-      temperature: 0.3,
+      max_tokens: 400, temperature: 0.3,
     }),
   });
   const text = await r.text();
-  console.log("Groq response status:", r.status);
-  console.log("Groq response:", text.slice(0, 300));
-  if (!r.ok) throw new Error("Groq error " + r.status + ": " + text.slice(0, 100));
+  console.log("Groq status:", r.status, text.slice(0, 200));
+  if (!r.ok) throw new Error("Groq error " + r.status);
   const d = JSON.parse(text);
   const content = d.choices[0].message.content.trim();
   const match = content.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error("No JSON from AI: " + content.slice(0, 100));
+  if (!match) throw new Error("No JSON from AI");
   return JSON.parse(match[0]);
 }
 
 function formatSignal(coin, tf, sig, ind) {
-  const emoji = { STRONG_BUY: "🟢🟢", BUY: "🟢", NEUTRAL: "⚪️", SELL: "🔴", STRONG_SELL: "🔴🔴" }[sig.signal] || "⚪️";
-  const riskEmoji = { LOW: "🟢", MEDIUM: "🟡", HIGH: "🔴" }[sig.risk] || "🟡";
+  const emoji = { STRONG_BUY:"🟢🟢", BUY:"🟢", NEUTRAL:"⚪️", SELL:"🔴", STRONG_SELL:"🔴🔴" }[sig.signal] || "⚪️";
+  const riskEmoji = { LOW:"🟢", MEDIUM:"🟡", HIGH:"🔴" }[sig.risk] || "🟡";
   return `${emoji} *${sig.signal}* — ${coin}/USDT ${tf.toUpperCase()}
 
 💰 *Price:* $${parseFloat(ind.price).toLocaleString()}
@@ -134,14 +134,13 @@ _Not financial advice. Always use stop losses._`;
 }
 
 async function sendMessage(chatId, text) {
-  console.log(`Sending message to ${chatId}`);
   const r = await fetch(`${TG}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text, parse_mode: "Markdown" }),
   });
   const d = await r.json();
-  if (!d.ok) console.error("Send message error:", JSON.stringify(d));
+  if (!d.ok) console.error("Send error:", JSON.stringify(d));
 }
 
 async function sendTyping(chatId) {
@@ -167,31 +166,19 @@ let offset = 0;
 async function poll() {
   try {
     const r = await fetch(`${TG}/getUpdates?offset=${offset}&timeout=30`);
-    if (!r.ok) {
-      console.error("Telegram poll error:", r.status);
-      setTimeout(poll, 3000);
-      return;
-    }
+    if (!r.ok) { console.error("Poll error:", r.status); setTimeout(poll, 3000); return; }
     const data = await r.json();
-    if (!data.ok) {
-      console.error("Telegram error:", JSON.stringify(data));
-      setTimeout(poll, 3000);
-      return;
-    }
+    if (!data.ok) { console.error("Telegram error:", JSON.stringify(data)); setTimeout(poll, 3000); return; }
 
     for (const update of data.result || []) {
       offset = update.update_id + 1;
       const msg = update.message;
       if (!msg || !msg.text) continue;
-
       const chatId = msg.chat.id;
       const text = msg.text.trim().toUpperCase();
       console.log(`Message from ${chatId}: ${text}`);
 
-      if (text === "/START" || text === "/HELP") {
-        await sendMessage(chatId, HELP);
-        continue;
-      }
+      if (text === "/START" || text === "/HELP") { await sendMessage(chatId, HELP); continue; }
 
       const parts = text.split(/\s+/);
       const coin = parts[0];
@@ -201,9 +188,7 @@ async function poll() {
         await sendMessage(chatId, `❌ Unknown coin: *${coin}*\n\nSupported: BTC, ETH, SOL, BNB, XRP, DOGE, ADA`);
         continue;
       }
-
-      const validTFs = ["15m", "1h", "4h", "1d"];
-      if (!validTFs.includes(tf)) {
+      if (!["15m","1h","4h","1d"].includes(tf)) {
         await sendMessage(chatId, `❌ Unknown timeframe: *${tf}*\n\nSupported: 15m, 1h, 4h, 1d`);
         continue;
       }
@@ -217,12 +202,10 @@ async function poll() {
         await sendMessage(chatId, formatSignal(coin, tf, sig, ind));
       } catch (e) {
         console.error("Signal error:", e.message);
-        await sendMessage(chatId, `❌ Error generating signal: ${e.message}`);
+        await sendMessage(chatId, `❌ Error: ${e.message}`);
       }
     }
-  } catch (e) {
-    console.error("Poll error:", e.message);
-  }
+  } catch (e) { console.error("Poll error:", e.message); }
   setTimeout(poll, 1000);
 }
 
