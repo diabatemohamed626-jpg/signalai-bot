@@ -60,7 +60,7 @@ const SYMBOLS = {
 // KuCoin — no geo restrictions
 async function fetchSignal(symbol, tf) {
   console.log(`Fetching candles for ${symbol} ${tf}`);
-  const tfMap = { "15m": "15min", "1h": "1hour", "4h": "4hour", "1d": "1day" };
+  const tfMap = { "1m": "1min", "3m": "3min", "5m": "5min", "15m": "15min", "30m": "30min", "1h": "1hour", "2h": "2hour", "4h": "4hour", "6h": "6hour", "8h": "8hour", "12h": "12hour", "1d": "1day", "3d": "3day", "1w": "1week" };
   const kucoinTf = tfMap[tf] || "1hour";
   const url = `https://api.kucoin.com/api/v1/market/candles?type=${kucoinTf}&symbol=${symbol}&limit=100`;
   const r = await fetch(url);
@@ -159,7 +159,7 @@ Send a message like:
 • \`SOL 15m\` — Solana 15 min signal
 
 *Supported coins:* BTC, ETH, SOL, BNB, XRP, DOGE, ADA
-*Timeframes:* 15m, 1h, 4h, 1d`;
+*Timeframes:* 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w`;
 
 let offset = 0;
 
@@ -188,7 +188,7 @@ async function poll() {
         await sendMessage(chatId, `❌ Unknown coin: *${coin}*\n\nSupported: BTC, ETH, SOL, BNB, XRP, DOGE, ADA`);
         continue;
       }
-      if (!["15m","1h","4h","1d"].includes(tf)) {
+      if (!["1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d","3d","1w"].includes(tf)) {
         await sendMessage(chatId, `❌ Unknown timeframe: *${tf}*\n\nSupported: 15m, 1h, 4h, 1d`);
         continue;
       }
