@@ -1,0 +1,12 @@
+{
+  "name": "signalai-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "signalbot.mjs",
+  "scripts": {
+    "start": "node signalbot.mjs"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  }
+}
