@@ -4,6 +4,10 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const TG = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
+// ── Channel IDs — replace with your real channel IDs ──────
+const SCALP_CHANNEL_ID = process.env.SCALP_CHANNEL_ID;   // e.g. -1001234567890
+const SWING_CHANNEL_ID = process.env.SWING_CHANNEL_ID;   // e.g. -1009876543210
+
 console.log("Bot starting...");
 console.log("Token set:", !!TELEGRAM_TOKEN);
 console.log("Groq set:", !!GROQ_API_KEY);
@@ -13,23 +17,20 @@ const sessions = {};
 // ── Market session detector ────────────────────────────────
 function getMarketSession() {
   const hour = new Date().getUTCHours();
-  if (hour >= 22 || hour < 7)  return { session: "ASIAN",     liquidity: "LOW",    note: "Low volume Asian session. Slow moves, wider spreads. Add 2-3x to hold time." };
-  if (hour >= 7  && hour < 12) return { session: "LONDON",    liquidity: "HIGH",   note: "London session open. High volume, strong moves. Hold times as suggested." };
-  if (hour >= 12 && hour < 17) return { session: "NEW YORK",  liquidity: "VERY HIGH", note: "NY+London overlap. Highest volume of the day. Fast moves, signals more reliable." };
-  if (hour >= 17 && hour < 22) return { session: "NY CLOSE",  liquidity: "MEDIUM", note: "NY closing session. Fading volume. Consider shorter holds or avoid new entries." };
+  if (hour >= 22 || hour < 7)  return { session: "ASIAN",     liquidity: "LOW",      note: "Low volume Asian session. Slow moves, wider spreads. Add 2-3x to hold time." };
+  if (hour >= 7  && hour < 12) return { session: "LONDON",    liquidity: "HIGH",     note: "London session open. High volume, strong moves. Hold times as suggested." };
+  if (hour >= 12 && hour < 17) return { session: "NEW YORK",  liquidity: "VERY HIGH",note: "NY+London overlap. Highest volume of the day. Fast moves, signals more reliable." };
+  if (hour >= 17 && hour < 22) return { session: "NY CLOSE",  liquidity: "MEDIUM",   note: "NY closing session. Fading volume. Consider shorter holds or avoid new entries." };
   return { session: "MIXED", liquidity: "NORMAL", note: "" };
 }
 
 function getSmartHoldTime(tf, session) {
   const base = {
-    "1m": 15, "3m": 30, "5m": 45, "15m": 90,
-    "30m": 180, "1h": 240, "2h": 480, "4h": 720,
-    "6h": 1080, "8h": 1440, "12h": 2160, "1d": 4320, "3d": 10080, "1w": 20160
+    "1m":15,"3m":30,"5m":45,"15m":90,"30m":180,"1h":240,"2h":480,
+    "4h":720,"6h":1080,"8h":1440,"12h":2160,"1d":4320,"3d":10080,"1w":20160
   }[tf] || 240;
-
-  const multiplier = session.liquidity === "LOW" ? 2.5 : session.liquidity === "MEDIUM" ? 1.5 : 1;
+  const multiplier = session.liquidity==="LOW"?2.5:session.liquidity==="MEDIUM"?1.5:1;
   const mins = Math.round(base * multiplier);
-
   if (mins < 60)   return `${mins} minutes`;
   if (mins < 1440) return `${Math.round(mins/60)} hours`;
   return `${Math.round(mins/1440)} days`;
@@ -65,16 +66,105 @@ function getIndicators(klines) {
   if((Math.min(lc.o,lc.c)-lc.l)>Math.abs(lc.o-lc.c)*2)patterns.push("Hammer");
   if(Math.abs(lc.o-lc.c)<(lc.h-lc.l)*0.1)patterns.push("Doji");
   return {
-    price:last, atr,
-    rsi:rsi.toFixed(1), rsiState:rsi<30?"OVERSOLD":rsi>70?"OVERBOUGHT":"NEUTRAL",
-    macd:(e12-e26).toFixed(5), macdState:e12>e26?"BULLISH":"BEARISH",
-    sma20:s20.toFixed(5), sma50:s50.toFixed(5),
+    price:last,atr,
+    rsi:rsi.toFixed(1),rsiState:rsi<30?"OVERSOLD":rsi>70?"OVERBOUGHT":"NEUTRAL",
+    macd:(e12-e26).toFixed(5),macdState:e12>e26?"BULLISH":"BEARISH",
+    sma20:s20.toFixed(5),sma50:s50.toFixed(5),
     trend:last>s50?"UPTREND":"DOWNTREND",
-    bbUpper:(bm+2*bs).toFixed(5), bbLower:(bm-2*bs).toFixed(5),
-    support:Math.min(...l.slice(-20)).toFixed(5), resistance:Math.max(...h.slice(-20)).toFixed(5),
+    bbUpper:(bm+2*bs).toFixed(5),bbLower:(bm-2*bs).toFixed(5),
+    support:Math.min(...l.slice(-20)).toFixed(5),resistance:Math.max(...h.slice(-20)).toFixed(5),
     volume:v[v.length-1]>avgV*1.2?"HIGH":v[v.length-1]<avgV*0.8?"LOW":"NORMAL",
     patterns:patterns.length?patterns.join(", "):"None",
   };
+}
+
+// ── NEW: 4H Trend Analysis ─────────────────────────────────
+function get4HTrend(klines4h) {
+  const c = klines4h.map(k => +k[4]);
+  const h = klines4h.map(k => +k[2]);
+  const l = klines4h.map(k => +k[3]);
+  const last = c[c.length - 1];
+
+  // EMA 20 and EMA 50 on 4H
+  const ema20 = calcEMA(c, 20);
+  const ema50 = calcEMA(c, 50);
+
+  // RSI on 4H
+  const rsi4h = calcRSI(c);
+
+  // Structure: higher highs / lower lows over last 10 candles
+  const recentHighs = h.slice(-10);
+  const recentLows  = l.slice(-10);
+  const higherHighs = recentHighs[recentHighs.length-1] > recentHighs[0];
+  const higherLows  = recentLows[recentLows.length-1]   > recentLows[0];
+  const lowerHighs  = recentHighs[recentHighs.length-1] < recentHighs[0];
+  const lowerLows   = recentLows[recentLows.length-1]   < recentLows[0];
+
+  // Determine trend
+  let trend4h, trendStrength, trendColor;
+
+  if (last > ema20 && ema20 > ema50 && higherHighs && higherLows) {
+    trend4h = "BULLISH";
+    trendStrength = "STRONG";
+    trendColor = "🟢";
+  } else if (last > ema50 && rsi4h > 50) {
+    trend4h = "BULLISH";
+    trendStrength = "WEAK";
+    trendColor = "🟡";
+  } else if (last < ema20 && ema20 < ema50 && lowerHighs && lowerLows) {
+    trend4h = "BEARISH";
+    trendStrength = "STRONG";
+    trendColor = "🔴";
+  } else if (last < ema50 && rsi4h < 50) {
+    trend4h = "BEARISH";
+    trendStrength = "WEAK";
+    trendColor = "🟡";
+  } else {
+    trend4h = "NEUTRAL";
+    trendStrength = "RANGING";
+    trendColor = "⚪️";
+  }
+
+  return { trend4h, trendStrength, trendColor, ema20_4h: ema20.toFixed(5), ema50_4h: ema50.toFixed(5), rsi4h: rsi4h.toFixed(1) };
+}
+
+// ── NEW: Signal Type Router ────────────────────────────────
+// Returns: { type, action, reason }
+// type: "SWING" | "SCALP" | "SKIP"
+function classifySignal(signal, trend4h, session) {
+  const isBuy  = ["BUY","STRONG_BUY"].includes(signal);
+  const isSell = ["SELL","STRONG_SELL"].includes(signal);
+  const { trend4h: t, trendStrength } = trend4h;
+  const isLowLiquidity = session.liquidity === "LOW";
+
+  // SKIP conditions — hard filters
+  if (isLowLiquidity && trendStrength === "WEAK") {
+    return { type: "SKIP", reason: "⚠️ Asian session + weak trend. No clear setup. Wait for London open." };
+  }
+  if (isBuy && t === "BEARISH" && trendStrength === "STRONG") {
+    return { type: "SKIP", reason: "⚠️ 4H strongly bearish. Buying against strong trend. Skipping." };
+  }
+  if (isSell && t === "BULLISH" && trendStrength === "STRONG") {
+    return { type: "SKIP", reason: "⚠️ 4H strongly bullish. Selling against strong trend. Skipping." };
+  }
+
+  // SWING conditions — 4H and signal fully aligned
+  if ((isBuy && t === "BULLISH") || (isSell && t === "BEARISH")) {
+    return { type: "SWING", reason: `✅ 4H ${t} aligns with ${signal}. High conviction setup. Target TP2.` };
+  }
+
+  // SCALP conditions — neutral 4H or weak alignment
+  if (t === "NEUTRAL" || trendStrength === "WEAK") {
+    return { type: "SCALP", reason: `⚡ 4H is ${t}. Range-bound. Scalp to TP1 only. Do not hold to TP2.` };
+  }
+
+  // Counter-trend scalp — weak opposite trend
+  if ((isBuy && t === "BEARISH" && trendStrength === "WEAK") ||
+      (isSell && t === "BULLISH" && trendStrength === "WEAK")) {
+    return { type: "SCALP", reason: `⚡ Counter-trend scalp. 4H ${t} but weak. TP1 only. Tight SL.` };
+  }
+
+  return { type: "SCALP", reason: "⚡ No strong trend alignment. Scalp setup only." };
 }
 
 // ── Position sizing ────────────────────────────────────────
@@ -83,10 +173,8 @@ function calcPosition(balance, price, atr, leverage=1) {
   const slDist = atr * 1.2;
   let size = risk / slDist;
   let value = size * price;
-  // Cap at 20% of total buying power
   const maxValue = balance * leverage * 0.20;
   if (value > maxValue) { value = maxValue; size = value / price; }
-  // If no leverage, never exceed 20% of balance
   if (leverage === 1 && value > balance * 0.20) { value = balance * 0.20; size = value / price; }
   const margin = value / leverage;
   const marginPct = (margin / balance) * 100;
@@ -108,31 +196,20 @@ function calcLevels(price, atr, isBuy) {
 
 // ── Symbols ────────────────────────────────────────────────
 const CRYPTO = {
-  BTC:"BTC-USDT", ETH:"ETH-USDT", SOL:"SOL-USDT", BNB:"BNB-USDT",
-  XRP:"XRP-USDT", DOGE:"DOGE-USDT", ADA:"ADA-USDT", AVAX:"AVAX-USDT",
-  MATIC:"MATIC-USDT", LINK:"LINK-USDT", DOT:"DOT-USDT",
-  UNI:"UNI-USDT", ATOM:"ATOM-USDT", LTC:"LTC-USDT",
+  BTC:"BTC-USDT",ETH:"ETH-USDT",SOL:"SOL-USDT",BNB:"BNB-USDT",
+  XRP:"XRP-USDT",DOGE:"DOGE-USDT",ADA:"ADA-USDT",AVAX:"AVAX-USDT",
+  MATIC:"MATIC-USDT",LINK:"LINK-USDT",DOT:"DOT-USDT",
+  UNI:"UNI-USDT",ATOM:"ATOM-USDT",LTC:"LTC-USDT",
 };
-
-// Forex via ExchangeRate API (free) — we use a different data source
-const FOREX = {
-  "EURUSD":"EUR-USDT", "GBPUSD":"GBP-USDT", "USDJPY":"USDT-JPY",
-  "AUDUSD":"AUC-USDT", "USDCAD":"USDT-KCS",
-};
-
-// Forex pairs we'll fetch from a free forex API
 const FOREX_PAIRS = {
-  "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD", "USDJPY": "USD/JPY",
-  "AUDUSD": "AUD/USD", "USDCAD": "USD/CAD", "USDCHF": "USD/CHF",
-  "NZDUSD": "NZD/USD", "EURGBP": "EUR/GBP",
+  "EURUSD":"EUR/USD","GBPUSD":"GBP/USD","USDJPY":"USD/JPY",
+  "AUDUSD":"AUD/USD","USDCAD":"USD/CAD","USDCHF":"USD/CHF",
+  "NZDUSD":"NZD/USD","EURGBP":"EUR/GBP",
 };
-
-const SYMBOLS = { ...CRYPTO };
-const ALL_SYMBOLS = { ...CRYPTO, ...Object.fromEntries(Object.keys(FOREX_PAIRS).map(k=>[k,k])) };
-const COINS_LIST = Object.keys(CRYPTO).join(", ");
-const FOREX_LIST = Object.keys(FOREX_PAIRS).join(", ");
 const VALID_TFS = ["1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d","3d","1w"];
 const TF_MAP = {"1m":"1min","3m":"3min","5m":"5min","15m":"15min","30m":"30min","1h":"1hour","2h":"2hour","4h":"4hour","6h":"6hour","8h":"8hour","12h":"12hour","1d":"1day","3d":"3day","1w":"1week"};
+const COINS_LIST = Object.keys(CRYPTO).join(", ");
+const FOREX_LIST = Object.keys(FOREX_PAIRS).join(", ");
 
 async function fetchCryptoCandles(symbol, tf) {
   const url = `https://api.kucoin.com/api/v1/market/candles?type=${TF_MAP[tf]}&symbol=${symbol}&limit=210`;
@@ -144,7 +221,6 @@ async function fetchCryptoCandles(symbol, tf) {
 }
 
 async function fetchForexCandles(pair, tf) {
-  // Use Twelve Data free API for forex
   const intervalMap = {"1m":"1min","3m":"3min","5m":"5min","15m":"15min","30m":"30min","1h":"1h","2h":"2h","4h":"4h","1d":"1day","1w":"1week"};
   const interval = intervalMap[tf] || "1h";
   const symbol = pair.slice(0,3) + "/" + pair.slice(3);
@@ -153,11 +229,7 @@ async function fetchForexCandles(pair, tf) {
   if (!r.ok) throw new Error("Forex API error " + r.status);
   const json = await r.json();
   if (!json.values?.length) throw new Error("No forex data — try again in a moment");
-  // Twelve Data: [{datetime, open, high, low, close, volume}] newest first
-  const klines = json.values.reverse().map(k=>[
-    k.datetime, k.open, k.high, k.low, k.close, k.volume||"0"
-  ]);
-  return klines;
+  return json.values.reverse().map(k=>[k.datetime,k.open,k.high,k.low,k.close,k.volume||"0"]);
 }
 
 async function getAISignal(coin, tf, ind, session, holdTime) {
@@ -189,10 +261,11 @@ LEVEL GUIDANCE:
 If BUY: entry ~${p}, SL ~${buyLevels.sl}, TP1 ~${buyLevels.tp1}, TP2 ~${buyLevels.tp2}
 If SELL: entry ~${p}, SL ~${sellLevels.sl}, TP1 ~${sellLevels.tp1}, TP2 ~${sellLevels.tp2}
 
-IMPORTANT: Account for the ${session.session} session in your analysis. During low liquidity (Asian session), widen targets and warn about slow moves. During London/NY overlap, tighten stops and be more aggressive with targets.
+IMPORTANT: If the setup is unclear or indicators conflict strongly, return signal as "NEUTRAL".
+Account for the ${session.session} session. During low liquidity warn about slow moves.
 
-Reply ONLY with raw JSON, all fields with real values:
-{"signal":"BUY","confidence":75,"entry":"${p}","stopLoss":"${buyLevels.sl}","takeProfit1":"${buyLevels.tp1}","takeProfit2":"${buyLevels.tp2}","reasoning":"2-3 sentences including session context","risk":"MEDIUM","timeToHold":"${holdTime}","keyLevel":"${ind.support}","sessionWarning":"any warning about current session"}`;
+Reply ONLY with raw JSON:
+{"signal":"BUY","confidence":75,"entry":"${p}","stopLoss":"${buyLevels.sl}","takeProfit1":"${buyLevels.tp1}","takeProfit2":"${buyLevels.tp2}","reasoning":"2-3 sentences","risk":"MEDIUM","timeToHold":"${holdTime}","keyLevel":"${ind.support}","sessionWarning":"warning if any"}`;
 
   const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method:"POST",
@@ -208,7 +281,6 @@ Reply ONLY with raw JSON, all fields with real values:
   if (!match) throw new Error("No JSON returned");
   const sig = JSON.parse(match[0]);
 
-  // Fallback for nulls/zeros
   const isBuy = ["BUY","STRONG_BUY"].includes(sig.signal);
   const fb = calcLevels(p, a, isBuy);
   if (!sig.entry    ||+sig.entry    <=0) sig.entry       = p.toFixed(5);
@@ -222,7 +294,8 @@ Reply ONLY with raw JSON, all fields with real values:
   return sig;
 }
 
-function formatSignal(coin, tf, sig, ind, pos, session, holdTime, leverage=1) {
+// ── Format Signal ──────────────────────────────────────────
+function formatSignal(coin, tf, sig, ind, pos, session, holdTime, leverage=1, trend4hData=null, classification=null) {
   const isForex = !!FOREX_PAIRS[coin];
   const pair = isForex ? FOREX_PAIRS[coin] : coin+"/USDT";
   const emoji = {STRONG_BUY:"🟢🟢",BUY:"🟢",NEUTRAL:"⚪️",SELL:"🔴",STRONG_SELL:"🔴🔴"}[sig.signal]||"⚪️";
@@ -231,7 +304,23 @@ function formatSignal(coin, tf, sig, ind, pos, session, holdTime, leverage=1) {
   const conf = Math.min(Math.max(parseInt(sig.confidence)||65,0),100);
   const bar = "█".repeat(Math.round(conf/10))+"░".repeat(10-Math.round(conf/10));
 
+  // Signal type badge
+  const typeBadge = classification ? {
+    SWING: "🏹 *SWING TRADE* — Target TP2",
+    SCALP: "⚡ *SCALP TRADE* — Target TP1 only",
+    SKIP:  "🚫 *NO TRADE* — Setup invalid"
+  }[classification.type] : "";
+
+  // 4H trend block
+  const trend4hBlock = trend4hData ? `━━━━━━━━━━━━━━━━━━
+📊 *4H Trend Filter:*
+• Trend: ${trend4hData.trendColor} ${trend4hData.trend4h} (${trend4hData.trendStrength})
+• EMA20: ${trend4hData.ema20_4h} | EMA50: ${trend4hData.ema50_4h}
+• RSI 4H: ${trend4hData.rsi4h}
+• ${classification?.reason || ""}` : "";
+
   return `${emoji} *${sig.signal}* — ${pair} ${tf.toUpperCase()}
+${typeBadge}
 ━━━━━━━━━━━━━━━━━━
 🕐 *Session:* ${session.session} ${liqEmoji} ${session.liquidity} liquidity
 ⏱ *Suggested Hold:* ${holdTime}
@@ -246,6 +335,8 @@ ${riskEmoji} *Risk:* ${sig.risk}
 🎯 *TP1:* ${sig.takeProfit1}
 🏆 *TP2:* ${sig.takeProfit2}
 🔑 *Key Level:* ${sig.keyLevel||ind.support}
+━━━━━━━━━━━━━━━━━━
+${trend4hBlock}
 ━━━━━━━━━━━━━━━━━━
 💼 *Position Size (1% risk, 1:${leverage} leverage):*
 • Risk Amount: $${pos.risk}
@@ -267,6 +358,7 @@ ${sig.reasoning}
 _Not financial advice. Always use stop losses._`;
 }
 
+// ── Telegram helpers ───────────────────────────────────────
 async function send(chatId, text) {
   const r = await fetch(`${TG}/sendMessage`,{
     method:"POST",headers:{"Content-Type":"application/json"},
@@ -279,7 +371,17 @@ async function typing(chatId) {
   await fetch(`${TG}/sendChatAction`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat_id:chatId,action:"typing"})});
 }
 
-const HELP = `🤖 *SignalAI — Master Trader Bot*
+// ── NEW: Auto-broadcast to correct channel ─────────────────
+async function broadcastSignal(formattedMessage, classification) {
+  if (!SCALP_CHANNEL_ID || !SWING_CHANNEL_ID) return;
+  if (classification.type === "SKIP") return; // Don't broadcast skipped signals
+
+  const channelId = classification.type === "SWING" ? SWING_CHANNEL_ID : SCALP_CHANNEL_ID;
+  await send(channelId, formattedMessage);
+  console.log(`Signal broadcast to ${classification.type} channel`);
+}
+
+const HELP = `🤖 *MySignal AI — Master Trader Bot*
 
 Type a pair and timeframe:
 *Crypto:*
@@ -289,11 +391,11 @@ Type a pair and timeframe:
 • \`EURUSD 1h\` • \`GBPUSD 4h\` • \`USDJPY 1d\`
 
 Every signal includes:
-✅ Session-aware hold time (accounts for Asian/London/NY hours)
+✅ 4H trend filter — SWING or SCALP classification
+✅ Session-aware hold time (Asian/London/NY)
 ✅ Entry, Stop Loss, TP1 & TP2
-✅ Position size for your balance (1:500 leverage)
-✅ 1% risk per trade
-✅ Session warning if liquidity is low
+✅ Position size (1% risk management)
+✅ Auto-routed to correct Telegram channel
 
 *Crypto:* ${COINS_LIST}
 *Forex:* ${FOREX_LIST}
@@ -331,25 +433,8 @@ async function poll() {
         await send(chatId,`✅ Balance: $${balance.toLocaleString()}
 
 What is your account leverage?
-
 Examples: \`10\` (1:10) or \`100\` (1:100) or \`500\` (1:500)
-
 Type \`1\` if no leverage (spot trading)`);
-        continue;
-        try {
-          const session = getMarketSession();
-          const holdTime = getSmartHoldTime(tf, session);
-          const klines = isForex
-            ? await fetchForexCandles(coin, tf)
-            : await fetchCryptoCandles(CRYPTO[coin], tf);
-          const ind = getIndicators(klines);
-          const pos = calcPosition(balance, ind.price, ind.atr, 1);
-          const sig = await getAISignal(coin, tf, ind, session, holdTime);
-          await send(chatId, formatSignal(coin, tf, sig, ind, pos, session, holdTime, 1));
-        } catch(e) {
-          console.error("Error:", e.message);
-          await send(chatId,`❌ Error: ${e.message}`);
-        }
         continue;
       }
 
@@ -365,17 +450,53 @@ Type \`1\` if no leverage (spot trading)`);
         const isForex = !!FOREX_PAIRS[coin];
         const pair = isForex ? FOREX_PAIRS[coin] : coin+"/USDT";
         await typing(chatId);
-        await send(chatId,`🔍 Analysing *${pair}* ${tf.toUpperCase()} — Balance: $${balance.toLocaleString()} | Leverage: 1:${leverage}...`);
+        await send(chatId,`🔍 Analysing *${pair}* ${tf.toUpperCase()} with 4H filter — Balance: $${balance.toLocaleString()} | Leverage: 1:${leverage}...`);
+
         try {
           const session = getMarketSession();
           const holdTime = getSmartHoldTime(tf, session);
+
+          // Fetch main timeframe candles
           const klines = isForex
             ? await fetchForexCandles(coin, tf)
             : await fetchCryptoCandles(CRYPTO[coin], tf);
+
+          // ── NEW: Always fetch 4H candles for trend filter ──
+          let klines4h = null;
+          let trend4hData = null;
+          if (tf !== "4h" && tf !== "1d" && tf !== "3d" && tf !== "1w") {
+            try {
+              klines4h = isForex
+                ? await fetchForexCandles(coin, "4h")
+                : await fetchCryptoCandles(CRYPTO[coin], "4h");
+              trend4hData = get4HTrend(klines4h);
+            } catch(e) {
+              console.error("4H fetch failed:", e.message);
+            }
+          }
+
           const ind = getIndicators(klines);
           const pos = calcPosition(balance, ind.price, ind.atr, leverage);
           const sig = await getAISignal(coin, tf, ind, session, holdTime);
-          await send(chatId, formatSignal(coin, tf, sig, ind, pos, session, holdTime, leverage));
+
+          // ── NEW: Classify signal ───────────────────────────
+          const classification = trend4hData
+            ? classifySignal(sig.signal, trend4hData, session)
+            : { type: "SCALP", reason: "4H data unavailable. Treat as scalp." };
+
+          const message = formatSignal(coin, tf, sig, ind, pos, session, holdTime, leverage, trend4hData, classification);
+
+          // Send to user
+          await send(chatId, message);
+
+          // ── NEW: Broadcast to correct channel ─────────────
+          await broadcastSignal(message, classification);
+
+          // ── NEW: If SKIP, send extra warning to user ───────
+          if (classification.type === "SKIP") {
+            await send(chatId, `🚫 *Signal Skipped*\n\n${classification.reason}\n\nThis signal was NOT broadcast to any channel.`);
+          }
+
         } catch(e) {
           console.error("Error:", e.message);
           await send(chatId,`❌ Error: ${e.message}`);
